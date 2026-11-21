@@ -52,6 +52,14 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY, user_id INTEGER, branch_id INTEGER, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, payload TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS application_settings(setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS module_records(id INTEGER PRIMARY KEY, branch_id INTEGER, owner_user_id INTEGER, module_key TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', details TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS staff_profiles(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE, employee_code TEXT UNIQUE NOT NULL, full_name TEXT NOT NULL, phone TEXT NOT NULL, email TEXT, birth_date TEXT, hire_date TEXT NOT NULL, employment_status TEXT NOT NULL DEFAULT 'active' CHECK(employment_status IN ('active','leave','terminated')), department TEXT, position_title TEXT, manager_staff_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id), FOREIGN KEY(manager_staff_id) REFERENCES staff_profiles(id));
+    CREATE TABLE IF NOT EXISTS staff_branches(staff_id INTEGER NOT NULL, branch_id INTEGER NOT NULL, is_primary INTEGER DEFAULT 0, PRIMARY KEY(staff_id,branch_id), FOREIGN KEY(staff_id) REFERENCES staff_profiles(id), FOREIGN KEY(branch_id) REFERENCES branches(id));
+    CREATE TABLE IF NOT EXISTS access_roles(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, scope_type TEXT NOT NULL DEFAULT 'branch', active INTEGER DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS permissions(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, module_key TEXT NOT NULL, action TEXT NOT NULL, description TEXT);
+    CREATE TABLE IF NOT EXISTS role_permissions(role_id INTEGER NOT NULL, permission_id INTEGER NOT NULL, PRIMARY KEY(role_id,permission_id), FOREIGN KEY(role_id) REFERENCES access_roles(id), FOREIGN KEY(permission_id) REFERENCES permissions(id));
+    CREATE TABLE IF NOT EXISTS user_role_assignments(user_id INTEGER NOT NULL, role_id INTEGER NOT NULL, branch_id INTEGER, assigned_by INTEGER, assigned_at TEXT NOT NULL, PRIMARY KEY(user_id,role_id,branch_id), FOREIGN KEY(user_id) REFERENCES users(id), FOREIGN KEY(role_id) REFERENCES access_roles(id), FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(assigned_by) REFERENCES users(id));
+    CREATE TABLE IF NOT EXISTS work_shifts(id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, branch_id INTEGER NOT NULL, starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, shift_status TEXT NOT NULL DEFAULT 'scheduled' CHECK(shift_status IN ('scheduled','completed','cancelled')), note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(staff_id) REFERENCES staff_profiles(id), FOREIGN KEY(branch_id) REFERENCES branches(id));
+    CREATE TABLE IF NOT EXISTS staff_attendance_records(id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, shift_id INTEGER, check_type TEXT NOT NULL CHECK(check_type IN ('check_in','check_out')), checked_at TEXT NOT NULL, photo_data TEXT, latitude REAL, longitude REAL, accuracy_m REAL, verification_status TEXT NOT NULL DEFAULT 'pending' CHECK(verification_status IN ('verified','pending','rejected')), note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(staff_id) REFERENCES staff_profiles(id), FOREIGN KEY(shift_id) REFERENCES work_shifts(id));
     """)
     if first:
         seed(con)
@@ -63,7 +71,43 @@ def init_db(reset=False):
             for key,title in defaults.items():
                 owner=4 if key in {"schedule","results","tuition","materials","profile"} else None
                 con.execute("INSERT INTO module_records(branch_id,owner_user_id,module_key,title,status,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(1,owner,key,title,'active','Dữ liệu mẫu',now,now))
+        seed_staff_access(con)
+    seed_staff_access(con)
     con.commit(); con.close()
+
+def seed_staff_access(con):
+    now=datetime.now().isoformat(timespec="seconds")
+    roles=[('admin','Admin','Quản trị toàn hệ thống','chain'),('manager','Quản lý chi nhánh','Điều hành dữ liệu trong chi nhánh được giao','branch'),('cskh','CSKH','Chăm sóc khách hàng và lịch hẹn','branch'),('employee','Nhân viên','Hồ sơ, ca làm và chấm công cá nhân','self')]
+    con.executemany("INSERT OR IGNORE INTO access_roles(code,name,description,scope_type) VALUES(?,?,?,?)",roles)
+    permissions=[
+        ('staff.view','staff','view','Xem nhân sự'),('staff.create','staff','create','Tạo nhân sự'),('staff.update','staff','update','Cập nhật nhân sự'),('staff.terminate','staff','terminate','Khóa tài khoản/nghỉ việc'),
+        ('shift.manage','shifts','manage','Phân ca'),('staff_attendance.checkin','staff_attendance','checkin','Tự chấm công'),('staff_attendance.review','staff_attendance','review','Duyệt/chỉnh chấm công'),
+        ('roles.view','roles','view','Xem vai trò và quyền'),('roles.manage','roles','manage','Thiết lập quyền'),('audit.view','audit','view','Xem nhật ký')]
+    con.executemany("INSERT OR IGNORE INTO permissions(code,module_key,action,description) VALUES(?,?,?,?)",permissions)
+    grants={
+        'admin':[p[0] for p in permissions],
+        'manager':['staff.view','staff.create','staff.update','shift.manage','staff_attendance.review','roles.view'],
+        'cskh':['staff_attendance.checkin'],
+        'employee':['staff_attendance.checkin']}
+    for role_code, permission_codes in grants.items():
+        role_id=con.execute("SELECT id FROM access_roles WHERE code=?",(role_code,)).fetchone()[0]
+        for permission_code in permission_codes:
+            permission_id=con.execute("SELECT id FROM permissions WHERE code=?",(permission_code,)).fetchone()[0]
+            con.execute("INSERT OR IGNORE INTO role_permissions(role_id,permission_id) VALUES(?,?)",(role_id,permission_id))
+    if not con.execute("SELECT 1 FROM staff_profiles LIMIT 1").fetchone():
+        people=[(1,'NV001','Admin SpaFlow','0901000001','admin@spaflow.vn','1988-01-10','2023-01-01','active','Ban điều hành','Quản trị hệ thống',None),
+                (2,'NV002','Ngọc Anh CSKH','0901000002','ngocanh@spaflow.vn','1995-03-12','2024-02-01','active','Chăm sóc khách hàng','CSKH',1),
+                (3,'NV003','Quản lý Quận 1','0901000003','manager.q1@spaflow.vn','1990-08-22','2022-06-15','active','Vận hành','Quản lý chi nhánh',1),
+                (None,'NV004','KTV Lan Hương','0901000004','lanhuong@spaflow.vn','1997-10-04','2025-01-05','active','Dịch vụ','Kỹ thuật viên Spa',3),
+                (None,'NV005','Lê Thu Hà','0901000005','thuha@spaflow.vn','1992-11-18','2023-05-20','leave','Đào tạo','Giảng viên',3)]
+        for user_id,code,name,phone,email,birth,hire,status,dept,title,manager in people:
+            cur=con.execute("INSERT INTO staff_profiles(user_id,employee_code,full_name,phone,email,birth_date,hire_date,employment_status,department,position_title,manager_staff_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(user_id,code,name,phone,email,birth,hire,status,dept,title,manager,now,now))
+            staff_id=cur.lastrowid; branch_id=1 if code!='NV005' else 2
+            con.execute("INSERT INTO staff_branches(staff_id,branch_id,is_primary) VALUES(?,?,1)",(staff_id,branch_id))
+            if code=='NV004': con.execute("INSERT INTO staff_branches(staff_id,branch_id,is_primary) VALUES(?,?,0)",(staff_id,2))
+    for user_id,role_code,branch_id in [(1,'admin',None),(2,'cskh',1),(3,'manager',1)]:
+        role_id=con.execute("SELECT id FROM access_roles WHERE code=?",(role_code,)).fetchone()[0]
+        con.execute("INSERT OR IGNORE INTO user_role_assignments(user_id,role_id,branch_id,assigned_at) VALUES(?,?,?,?)",(user_id,role_id,branch_id,now))
 
 def seed(con):
     branches=[("Q1","SpaFlow Quận 1","123 Nguyễn Trãi, Quận 1",10.7749,106.7009), ("Q7","SpaFlow Quận 7","56 Trần Xuân Soạn, Quận 7",10.7350,106.7050), ("TD","SpaFlow Thủ Đức","9 Võ Văn Ngân, Thủ Đức",10.8506,106.7719)]
@@ -125,6 +169,19 @@ class App(SimpleHTTPRequestHandler):
         if write and actor['role']=='student':
             self.json(403,{"error":"Học viên chỉ có quyền xem dữ liệu cá nhân"}); return False
         return True
+    def has_permission(self,con,actor,permission):
+        if actor['role']=='admin': return True
+        return con.execute("SELECT 1 FROM user_role_assignments ura JOIN role_permissions rp ON rp.role_id=ura.role_id JOIN permissions p ON p.id=rp.permission_id WHERE ura.user_id=? AND p.code=?",(actor['id'],permission)).fetchone() is not None
+    def staff_scope(self,actor,alias='sp'):
+        if actor['role']=='admin': return "",[]
+        return f" WHERE EXISTS (SELECT 1 FROM staff_branches ss WHERE ss.staff_id={alias}.id AND ss.branch_id=?)",[actor['branch_id']]
+    def staff_in_scope(self,con,actor,staff_id):
+        if actor['role']=='admin': return True
+        return con.execute("SELECT 1 FROM staff_branches WHERE staff_id=? AND branch_id=?",(staff_id,actor['branch_id'])).fetchone() is not None
+    def can_manage_staff(self,con,actor,permission):
+        if not self.has_permission(con,actor,permission):
+            self.json(403,{"error":"Bạn không có quyền nhân sự phù hợp cho thao tác này"}); return False
+        return True
     def do_GET(self):
         p=urlparse(self.path); path=p.path
         if not path.startswith('/api/'):
@@ -136,6 +193,33 @@ class App(SimpleHTTPRequestHandler):
         try:
             if path=='/api/me': data=actor
             elif path=='/api/branches': data=rows(con.execute("SELECT id,code,name,address FROM branches WHERE active=1"))
+            elif path=='/api/staff':
+                if not self.can_manage_staff(con,actor,'staff.view'): return
+                clause,args=self.staff_scope(actor)
+                data=rows(con.execute("SELECT sp.*,u.username,u.active account_active,COALESCE((SELECT group_concat(b.name,' | ') FROM staff_branches sb JOIN branches b ON b.id=sb.branch_id WHERE sb.staff_id=sp.id),'') branch_names,COALESCE((SELECT group_concat(ar.name,' | ') FROM user_role_assignments ura JOIN access_roles ar ON ar.id=ura.role_id WHERE ura.user_id=sp.user_id),'Chưa cấp tài khoản') role_names FROM staff_profiles sp LEFT JOIN users u ON u.id=sp.user_id"+clause+" ORDER BY sp.employee_code",args))
+            elif path=='/api/staff/shifts':
+                if not self.can_manage_staff(con,actor,'staff.view'): return
+                clause,args=("",[]) if actor['role']=='admin' else (" WHERE ws.branch_id=?",[actor['branch_id']])
+                data=rows(con.execute("SELECT ws.*,sp.employee_code,sp.full_name,b.name branch_name FROM work_shifts ws JOIN staff_profiles sp ON sp.id=ws.staff_id JOIN branches b ON b.id=ws.branch_id"+clause+" ORDER BY ws.starts_at DESC",args))
+            elif path=='/api/staff/attendance':
+                if not (self.has_permission(con,actor,'staff_attendance.review') or self.has_permission(con,actor,'staff_attendance.checkin')): return self.json(403,{"error":"Bạn không có quyền xem chấm công"})
+                if actor['role']=='admin' or self.has_permission(con,actor,'staff_attendance.review'):
+                    clause,args=("",[]) if actor['role']=='admin' else (" WHERE EXISTS (SELECT 1 FROM staff_branches sb WHERE sb.staff_id=sa.staff_id AND sb.branch_id=?)",[actor['branch_id']])
+                else: clause,args=(" WHERE sp.user_id=?",[actor['id']])
+                data=rows(con.execute("SELECT sa.*,sp.full_name,sp.employee_code,ws.starts_at shift_starts_at,ws.ends_at shift_ends_at FROM staff_attendance_records sa JOIN staff_profiles sp ON sp.id=sa.staff_id LEFT JOIN work_shifts ws ON ws.id=sa.shift_id"+clause+" ORDER BY sa.checked_at DESC",args))
+            elif path.startswith('/api/staff/'):
+                if not self.can_manage_staff(con,actor,'staff.view'): return
+                sid=int(path.rsplit('/',1)[1])
+                if not self.staff_in_scope(con,actor,sid): return self.json(404,{"error":"Không tìm thấy nhân sự trong phạm vi của bạn"})
+                profile=row(con.execute("SELECT sp.*,u.username,u.active account_active FROM staff_profiles sp LEFT JOIN users u ON u.id=sp.user_id WHERE sp.id=?",(sid,)).fetchone())
+                if not profile:return self.json(404,{"error":"Không tìm thấy nhân sự"})
+                data={"staff":profile,"branches":rows(con.execute("SELECT b.id,b.code,b.name,sb.is_primary FROM staff_branches sb JOIN branches b ON b.id=sb.branch_id WHERE sb.staff_id=?",(sid,))),"roles":rows(con.execute("SELECT ar.id,ar.code,ar.name,ura.branch_id FROM user_role_assignments ura JOIN access_roles ar ON ar.id=ura.role_id WHERE ura.user_id=?",(profile['user_id'],))) if profile['user_id'] else [],"shifts":rows(con.execute("SELECT * FROM work_shifts WHERE staff_id=? ORDER BY starts_at DESC LIMIT 20",(sid,))),"attendance":rows(con.execute("SELECT * FROM staff_attendance_records WHERE staff_id=? ORDER BY checked_at DESC LIMIT 20",(sid,)))}
+            elif path=='/api/roles':
+                if not self.can_manage_staff(con,actor,'roles.view'): return
+                data=rows(con.execute("SELECT ar.*,count(DISTINCT ura.user_id) user_count FROM access_roles ar LEFT JOIN user_role_assignments ura ON ura.role_id=ar.id GROUP BY ar.id ORDER BY ar.id"))
+            elif path=='/api/permissions':
+                if not self.can_manage_staff(con,actor,'roles.view'): return
+                data=rows(con.execute("SELECT p.*,COALESCE((SELECT group_concat(rp.role_id) FROM role_permissions rp WHERE rp.permission_id=p.id),'') role_ids FROM permissions p ORDER BY p.module_key,p.action"))
             elif path=='/api/dashboard':
                 clause,args=self.where(actor); data={"customers":con.execute("SELECT count(*) FROM customers"+clause,args).fetchone()[0],"appointments":con.execute("SELECT count(*) FROM appointments"+clause,args).fetchone()[0],"students":con.execute("SELECT count(*) FROM students"+clause,args).fetchone()[0],"revenue":con.execute("SELECT COALESCE(sum(total),0) FROM invoices"+clause,args).fetchone()[0]}
             elif path=='/api/customers':
@@ -188,7 +272,48 @@ class App(SimpleHTTPRequestHandler):
         con=db()
         try:
             if path=='/api/logout': SESSIONS.pop(self.headers.get('Authorization','').removeprefix('Bearer '),None); return self.json(200,{"ok":True})
-            if path=='/api/customers':
+            if path=='/api/staff':
+                if not self.can_manage_staff(con,actor,'staff.create'): return
+                name,phone,code=body.get('full_name','').strip(),body.get('phone','').strip(),body.get('employee_code','').strip()
+                branch_ids=[int(x) for x in body.get('branch_ids',[]) if str(x).isdigit()]
+                if not name or not phone or not code or not branch_ids:return self.json(422,{"error":"Mã nhân viên, họ tên, số điện thoại và ít nhất một chi nhánh là bắt buộc"})
+                if actor['role']!='admin' and set(branch_ids)!={actor['branch_id']}:return self.json(403,{"error":"Quản lý chỉ có thể tạo nhân sự trong chi nhánh được giao"})
+                requested_roles=body.get('role_codes',[]) or []
+                if actor['role']!='admin' and any(r not in ('cskh','employee') for r in requested_roles):return self.json(403,{"error":"Quản lý không thể cấp vai trò vượt phạm vi"})
+                now=datetime.now().isoformat(); user_id=None; account=body.get('account') or {}
+                if account.get('username'):
+                    username=account['username'].strip(); raw_password=account.get('password','').strip()
+                    if len(raw_password)<4:return self.json(422,{"error":"Mật khẩu tài khoản cần tối thiểu 4 ký tự"})
+                    primary_role='manager' if 'manager' in requested_roles else 'cskh'
+                    user_id=con.execute("INSERT INTO users(branch_id,username,full_name,password_hash,role,active) VALUES(?,?,?,?,?,1)",(branch_ids[0],username,name,password(raw_password),primary_role)).lastrowid
+                cur=con.execute("INSERT INTO staff_profiles(user_id,employee_code,full_name,phone,email,birth_date,hire_date,employment_status,department,position_title,manager_staff_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(user_id,code,name,phone,body.get('email','').strip(),body.get('birth_date'),body.get('hire_date') or datetime.now().date().isoformat(),body.get('employment_status','active'),body.get('department','').strip(),body.get('position_title','').strip(),body.get('manager_staff_id'),now,now)); sid=cur.lastrowid
+                for i,bid in enumerate(branch_ids): con.execute("INSERT INTO staff_branches(staff_id,branch_id,is_primary) VALUES(?,?,?)",(sid,bid,1 if i==0 else 0))
+                if user_id:
+                    for role_code in requested_roles or ['employee']:
+                        role_row=con.execute("SELECT id FROM access_roles WHERE code=? AND active=1",(role_code,)).fetchone()
+                        if role_row: con.execute("INSERT INTO user_role_assignments(user_id,role_id,branch_id,assigned_by,assigned_at) VALUES(?,?,?,?,?)",(user_id,role_row[0],branch_ids[0],actor['id'],now))
+                self.audit(con,actor,'create','staff',sid,{"employee_code":code,"branches":branch_ids,"roles":requested_roles})
+            elif path=='/api/staff/shifts':
+                if not self.can_manage_staff(con,actor,'shift.manage'): return
+                staff_id=int(body.get('staff_id',0)); branch_id=int(body.get('branch_id') or actor['branch_id'] or 0)
+                if not staff_id or not body.get('starts_at') or not body.get('ends_at'): return self.json(422,{"error":"Nhân sự, thời gian bắt đầu và kết thúc là bắt buộc"})
+                if not self.staff_in_scope(con,actor,staff_id) or (actor['role']!='admin' and branch_id!=actor['branch_id']):return self.json(403,{"error":"Ca làm phải thuộc chi nhánh được giao"})
+                cur=con.execute("INSERT INTO work_shifts(staff_id,branch_id,starts_at,ends_at,shift_status,note,created_at) VALUES(?,?,?,?,?,?,?)",(staff_id,branch_id,body['starts_at'],body['ends_at'],'scheduled',body.get('note',''),datetime.now().isoformat())); self.audit(con,actor,'create','work_shift',cur.lastrowid,body)
+            elif path=='/api/staff/attendance':
+                if not self.has_permission(con,actor,'staff_attendance.checkin'): return self.json(403,{"error":"Bạn không có quyền tự chấm công"})
+                profile=row(con.execute("SELECT * FROM staff_profiles WHERE user_id=? AND employment_status='active'",(actor['id'],)).fetchone())
+                if not profile:return self.json(403,{"error":"Tài khoản chưa được liên kết với hồ sơ nhân viên đang làm việc"})
+                check_type=body.get('check_type','check_in'); shift_id=body.get('shift_id')
+                if check_type not in ('check_in','check_out'):return self.json(422,{"error":"Loại chấm công không hợp lệ"})
+                if not body.get('photo_data') or body.get('latitude') is None or body.get('longitude') is None:return self.json(422,{"error":"Chấm công cần ảnh chụp trực tiếp và vị trí GPS"})
+                if shift_id and not con.execute("SELECT 1 FROM work_shifts WHERE id=? AND staff_id=?",(shift_id,profile['id'])).fetchone():return self.json(404,{"error":"Không tìm thấy ca làm được phân công"})
+                cur=con.execute("INSERT INTO staff_attendance_records(staff_id,shift_id,check_type,checked_at,photo_data,latitude,longitude,accuracy_m,verification_status,note,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(profile['id'],shift_id,check_type,datetime.now().isoformat(),body['photo_data'],float(body['latitude']),float(body['longitude']),body.get('accuracy_m'),'pending',body.get('note',''),datetime.now().isoformat())); self.audit(con,actor,check_type,'staff_attendance',cur.lastrowid,{"shift_id":shift_id})
+            elif path=='/api/roles':
+                if not self.can_manage_staff(con,actor,'roles.manage'): return
+                code,name=body.get('code','').strip(),body.get('name','').strip()
+                if not code or not name:return self.json(422,{"error":"Mã và tên vai trò là bắt buộc"})
+                cur=con.execute("INSERT INTO access_roles(code,name,description,scope_type,active) VALUES(?,?,?,?,1)",(code,name,body.get('description','').strip(),body.get('scope_type','branch'))); self.audit(con,actor,'create','role',cur.lastrowid,body)
+            elif path=='/api/customers':
                 if actor['role'] not in ('admin','cskh','manager'): return self.json(403,{"error":"Không có quyền tạo khách hàng"})
                 name,phone=body.get('full_name','').strip(),body.get('phone','').strip()
                 if not name or not phone:return self.json(422,{"error":"Họ tên và số điện thoại là bắt buộc"})
@@ -256,7 +381,46 @@ class App(SimpleHTTPRequestHandler):
         if not actor:return
         con=db()
         try:
-            if path.startswith('/api/customers/'):
+            if path.startswith('/api/staff/'):
+                pieces=path.split('/')
+                if len(pieces)==4 and pieces[3].isdigit():
+                    if not self.can_manage_staff(con,actor,'staff.update'): return
+                    sid=int(pieces[3]); current=row(con.execute("SELECT * FROM staff_profiles WHERE id=?",(sid,)).fetchone())
+                    if not current or not self.staff_in_scope(con,actor,sid):return self.json(404,{"error":"Không tìm thấy nhân sự trong phạm vi của bạn"})
+                    status=body.get('employment_status',current['employment_status'])
+                    if status not in ('active','leave','terminated'):return self.json(422,{"error":"Trạng thái làm việc không hợp lệ"})
+                    branch_ids=body.get('branch_ids')
+                    if branch_ids is not None:
+                        branch_ids=[int(x) for x in branch_ids if str(x).isdigit()]
+                        if not branch_ids:return self.json(422,{"error":"Nhân sự cần ít nhất một chi nhánh"})
+                        if actor['role']!='admin' and set(branch_ids)!={actor['branch_id']}:return self.json(403,{"error":"Không được điều chuyển vượt chi nhánh được giao"})
+                        con.execute("DELETE FROM staff_branches WHERE staff_id=?",(sid,))
+                        for i,bid in enumerate(branch_ids):con.execute("INSERT INTO staff_branches(staff_id,branch_id,is_primary) VALUES(?,?,?)",(sid,bid,1 if i==0 else 0))
+                    con.execute("UPDATE staff_profiles SET full_name=?,phone=?,email=?,birth_date=?,hire_date=?,employment_status=?,department=?,position_title=?,manager_staff_id=?,updated_at=? WHERE id=?",(body.get('full_name',current['full_name']).strip(),body.get('phone',current['phone']).strip(),body.get('email',current['email']),body.get('birth_date',current['birth_date']),body.get('hire_date',current['hire_date']),status,body.get('department',current['department']),body.get('position_title',current['position_title']),body.get('manager_staff_id',current['manager_staff_id']),datetime.now().isoformat(),sid))
+                    if current['user_id'] and status in ('leave','terminated'):
+                        con.execute("UPDATE users SET active=0 WHERE id=?",(current['user_id'],))
+                        for token,session in list(SESSIONS.items()):
+                            if session['id']==current['user_id']: SESSIONS.pop(token,None)
+                    if current['user_id'] and body.get('role_codes') is not None:
+                        requested_roles=body['role_codes']
+                        if actor['role']!='admin' and any(r not in ('cskh','employee') for r in requested_roles):return self.json(403,{"error":"Quản lý không thể cấp vai trò vượt phạm vi"})
+                        con.execute("DELETE FROM user_role_assignments WHERE user_id=?",(current['user_id'],))
+                        for role_code in requested_roles:
+                            role_row=con.execute("SELECT id FROM access_roles WHERE code=? AND active=1",(role_code,)).fetchone()
+                            if role_row:con.execute("INSERT INTO user_role_assignments(user_id,role_id,branch_id,assigned_by,assigned_at) VALUES(?,?,?,?,?)",(current['user_id'],role_row[0],actor['branch_id'],actor['id'],datetime.now().isoformat()))
+                    self.audit(con,actor,'update','staff',sid,body)
+                else:return self.json(404,{"error":"API nhân sự không tồn tại"})
+            elif path.startswith('/api/roles/'):
+                if not self.can_manage_staff(con,actor,'roles.manage'): return
+                role_id=int(path.rsplit('/',1)[1]); role=row(con.execute("SELECT * FROM access_roles WHERE id=?",(role_id,)).fetchone())
+                if not role:return self.json(404,{"error":"Không tìm thấy vai trò"})
+                con.execute("UPDATE access_roles SET name=?,description=?,scope_type=?,active=? WHERE id=?",(body.get('name',role['name']).strip(),body.get('description',role['description']),body.get('scope_type',role['scope_type']),int(body.get('active',role['active'])),role_id))
+                if 'permission_ids' in body:
+                    con.execute("DELETE FROM role_permissions WHERE role_id=?",(role_id,))
+                    for permission_id in body['permission_ids']:
+                        con.execute("INSERT OR IGNORE INTO role_permissions(role_id,permission_id) VALUES(?,?)",(role_id,int(permission_id)))
+                self.audit(con,actor,'update','role',role_id,body)
+            elif path.startswith('/api/customers/'):
                 if actor['role'] not in ('admin','cskh','manager'): return self.json(403,{"error":"Không có quyền sửa khách hàng"})
                 cid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM customers WHERE id=?",(cid,)).fetchone())
                 if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy khách hàng"})
