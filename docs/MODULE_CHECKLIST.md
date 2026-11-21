@@ -10,7 +10,7 @@
 | Attendance | Working foundation | Server validation: enrollment, one result/session; camera/GPS supplied by client |
 | Services & price list | Working foundation | Branch-scoped list/create/update, search/filter, form validation and role guard |
 | Inventory | Working foundation | Branch-scoped product list/create/update plus transactional in/out/adjustment; negative stock is rejected |
-| Invoices / payments | Working foundation | Branch-scoped list plus transactional partial/full payment API |
+| Invoices / payments | Working foundation | Branch-scoped invoice list, search/filter, payment form and transactional partial/full payment API |
 | Reports | Working foundation | Branch-scoped revenue, paid/debt, appointment status and low-stock overview |
 | System settings | Working foundation | Admin-only persisted spa name, support number and currency configuration |
 | Commissions, cash, messages, assignments, certificates | Not implemented | Database/API work remains |
