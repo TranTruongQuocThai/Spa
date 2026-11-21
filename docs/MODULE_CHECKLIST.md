@@ -12,3 +12,4 @@
 | Invoices / payments | Working foundation | Branch-scoped list plus transactional partial/full payment API |
 | Commissions, cash, messages, assignments, certificates | Not implemented | Database/API work remains |
 | UI integration with API | In progress | Dashboard and CRM use API; appointment UI now creates/cancels records; remaining modules use existing MVP screens |
+| Shared responsive shell | Code complete | Mobile sidebar overlay/close/Escape/navigation close, focus return, scroll lock, safe-area drawer/modal rules; browser viewport run pending |
