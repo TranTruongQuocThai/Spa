@@ -290,10 +290,16 @@ class App(SimpleHTTPRequestHandler):
                 clause,args=self.where(actor); data=rows(con.execute("SELECT cl.*,co.name course_name,b.name branch_name,count(e.id) student_count FROM classes cl JOIN courses co ON co.id=cl.course_id JOIN branches b ON b.id=cl.branch_id LEFT JOIN enrollments e ON e.class_id=cl.id"+clause.replace('branch_id','cl.branch_id')+" GROUP BY cl.id ORDER BY cl.id",args))
             elif path.startswith('/api/classes/') and path.endswith('/students'):
                 cid=int(path.split('/')[3]); data=rows(con.execute("SELECT s.*,e.status enrollment_status FROM enrollments e JOIN students s ON s.id=e.student_id WHERE e.class_id=?",(cid,)))
+            elif path=='/api/students':
+                if actor['role']=='student': data=rows(con.execute("SELECT * FROM students WHERE user_id=?",(actor['id'],)))
+                else:
+                    clause,args=self.where(actor); term=q.get('q',[''])[0]; extra=(" AND (s.full_name LIKE ? OR s.code LIKE ? OR s.phone LIKE ?)" if clause else " WHERE (s.full_name LIKE ? OR s.code LIKE ? OR s.phone LIKE ?)") if term else ''; values=args+([f'%{term}%']*3 if term else []); data=rows(con.execute("SELECT s.*,b.name branch_name,COALESCE((SELECT group_concat(c.name,' | ') FROM enrollments e JOIN classes c ON c.id=e.class_id WHERE e.student_id=s.id),'Chưa ghi danh') class_names FROM students s JOIN branches b ON b.id=s.branch_id"+clause.replace('branch_id','s.branch_id')+extra+" ORDER BY s.id DESC",values))
             elif path.startswith('/api/students/'):
                 sid=int(path.split('/')[3]); student=row(con.execute("SELECT * FROM students WHERE id=?",(sid,)).fetchone());
                 if not student: return self.json(404,{"error":"Không tìm thấy học viên"})
-                data={"student":student,"attendance":rows(con.execute("SELECT ar.*,cs.starts_at,cs.ends_at,c.name class_name FROM attendance_records ar JOIN class_sessions cs ON cs.id=ar.session_id JOIN classes c ON c.id=cs.class_id WHERE ar.student_id=? ORDER BY cs.starts_at DESC",(sid,)))}
+                if actor['role']!='admin' and actor['role']!='student' and student['branch_id']!=actor['branch_id']: return self.json(404,{"error":"Không tìm thấy học viên trong phạm vi của bạn"})
+                if actor['role']=='student' and student['user_id']!=actor['id']: return self.json(403,{"error":"Chỉ được xem hồ sơ của bản thân"})
+                data={"student":student,"enrollments":rows(con.execute("SELECT e.*,c.code class_code,c.name class_name,co.name course_name,co.tuition FROM enrollments e JOIN classes c ON c.id=e.class_id JOIN courses co ON co.id=c.course_id WHERE e.student_id=?",(sid,))),"attendance":rows(con.execute("SELECT ar.*,cs.starts_at,cs.ends_at,c.name class_name FROM attendance_records ar JOIN class_sessions cs ON cs.id=ar.session_id JOIN classes c ON c.id=cs.class_id WHERE ar.student_id=? ORDER BY cs.starts_at DESC",(sid,)))}
             elif path=='/api/attendance':
                 if actor['role']=='student': data=rows(con.execute("SELECT ar.*,cs.starts_at,cs.ends_at,c.name class_name FROM attendance_records ar JOIN class_sessions cs ON cs.id=ar.session_id JOIN classes c ON c.id=cs.class_id JOIN students st ON st.id=ar.student_id WHERE st.user_id=? ORDER BY cs.starts_at DESC",(actor['id'],)))
                 else: data=rows(con.execute("SELECT ar.*,st.full_name,cs.starts_at,c.name class_name FROM attendance_records ar JOIN students st ON st.id=ar.student_id JOIN class_sessions cs ON cs.id=ar.session_id JOIN classes c ON c.id=cs.class_id"))
