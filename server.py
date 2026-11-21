@@ -42,9 +42,13 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL, amount REAL NOT NULL, method TEXT NOT NULL, paid_at TEXT NOT NULL, FOREIGN KEY(invoice_id) REFERENCES invoices(id));
     CREATE TABLE IF NOT EXISTS stock_movements(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, product_id INTEGER NOT NULL, movement_type TEXT NOT NULL, quantity INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(product_id) REFERENCES products(id));
     CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY, user_id INTEGER, branch_id INTEGER, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, payload TEXT, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS application_settings(setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT NOT NULL);
     """)
     if first:
         seed(con)
+    else:
+        now=datetime.now().isoformat(timespec="seconds")
+        con.executemany("INSERT OR IGNORE INTO application_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",[("spa_name","SpaFlow",now),("support_phone","0900 000 000",now),("currency","VND",now)])
     con.commit(); con.close()
 
 def seed(con):
@@ -71,6 +75,7 @@ def seed(con):
     base=datetime.now().replace(hour=8,minute=30,second=0,microsecond=0)
     for i in range(1,201): con.execute("INSERT INTO class_sessions(class_id,starts_at,ends_at,room,is_open) VALUES(?,?,?,?,?)",((i-1)%15+1,(base+timedelta(days=i-100)).isoformat(),(base+timedelta(days=i-100,hours=3)).isoformat(),"Phòng học A",1))
     for i in range(1,31): con.execute("INSERT INTO invoices(branch_id,customer_id,code,total,paid,status,created_at) VALUES(?,?,?,?,?,?,?)",((i-1)%3+1,i,f"HD{i:05d}",800000+i*100000,800000+i*50000,"paid" if i%2 else "partial",now))
+    con.executemany("INSERT INTO application_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",[("spa_name","SpaFlow",now),("support_phone","0900 000 000",now),("currency","VND",now)])
 
 def row(x): return dict(x) if x else None
 def rows(xs): return [dict(x) for x in xs]
@@ -125,12 +130,19 @@ class App(SimpleHTTPRequestHandler):
                 else: data=rows(con.execute("SELECT ar.*,st.full_name,cs.starts_at,c.name class_name FROM attendance_records ar JOIN students st ON st.id=ar.student_id JOIN class_sessions cs ON cs.id=ar.session_id JOIN classes c ON c.id=cs.class_id"))
             elif path=='/api/products':
                 clause,args=self.where(actor); data=rows(con.execute("SELECT * FROM products"+clause,args))
+            elif path=='/api/services':
+                clause,args=self.where(actor); data=rows(con.execute("SELECT * FROM services"+clause,args))
             elif path=='/api/invoices':
                 clause,args=self.where(actor); data=rows(con.execute("SELECT i.*,c.full_name customer_name FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id"+clause.replace('branch_id','i.branch_id'),args))
             elif path=='/api/payments':
                 clause,args=self.where(actor); data=rows(con.execute("SELECT p.*,i.code invoice_code FROM payments p JOIN invoices i ON i.id=p.invoice_id"+clause.replace('branch_id','i.branch_id')+" ORDER BY p.paid_at DESC",args))
             elif path=='/api/stock-movements':
                 clause,args=self.where(actor); data=rows(con.execute("SELECT sm.*,p.name product_name FROM stock_movements sm JOIN products p ON p.id=sm.product_id"+clause.replace('branch_id','sm.branch_id')+" ORDER BY sm.created_at DESC",args))
+            elif path=='/api/reports/overview':
+                clause,args=self.where(actor); data={"revenue":con.execute("SELECT COALESCE(sum(total),0) FROM invoices"+clause,args).fetchone()[0],"paid":con.execute("SELECT COALESCE(sum(paid),0) FROM invoices"+clause,args).fetchone()[0],"debt":con.execute("SELECT COALESCE(sum(total-paid),0) FROM invoices"+clause,args).fetchone()[0],"appointments":rows(con.execute("SELECT status,count(*) total FROM appointments"+clause+" GROUP BY status",args)),"low_stock":rows(con.execute("SELECT name,stock,reorder_level FROM products"+clause+(" AND" if clause else " WHERE")+" stock<=reorder_level ORDER BY stock",args))}
+            elif path=='/api/settings':
+                if actor['role']!='admin': return self.json(403,{"error":"Chỉ Admin được xem cài đặt hệ thống"})
+                data=rows(con.execute("SELECT setting_key,setting_value FROM application_settings ORDER BY setting_key"))
             else: return self.json(404,{"error":"API không tồn tại"})
             self.json(200,{"data":data})
         finally: con.close()
@@ -162,6 +174,16 @@ class App(SimpleHTTPRequestHandler):
                 if not con.execute("SELECT 1 FROM enrollments WHERE class_id=? AND student_id=?",(session['class_id'],student['id'])).fetchone(): return self.json(403,{"error":"Bạn không thuộc lớp học này"})
                 if con.execute("SELECT 1 FROM attendance_records WHERE session_id=? AND student_id=?",(session_id,student['id'])).fetchone(): return self.json(409,{"error":"Bạn đã có kết quả điểm danh cho buổi này"})
                 status='present' if body.get('latitude') is not None and body.get('photo_data') else 'pending_verification'; cur=con.execute("INSERT INTO attendance_records(session_id,student_id,status,checked_in_at,photo_data,latitude,longitude,accuracy_m,note,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(session_id,student['id'],status,datetime.now().isoformat(),body.get('photo_data'),body.get('latitude'),body.get('longitude'),body.get('accuracy_m'),body.get('note'),datetime.now().isoformat())); self.audit(con,actor,'checkin','attendance',cur.lastrowid,{"status":status})
+            elif path=='/api/services':
+                if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền thêm dịch vụ"})
+                name=body.get('name','').strip(); duration=int(body.get('duration_min',0)); price=float(body.get('price',0))
+                if not name or duration<=0 or price<0:return self.json(422,{"error":"Tên, thời lượng và giá dịch vụ không hợp lệ"})
+                bid=body.get('branch_id') if actor['role']=='admin' else actor['branch_id']; cur=con.execute("INSERT INTO services(branch_id,name,duration_min,price,active) VALUES(?,?,?,?,1)",(bid,name,duration,price)); self.audit(con,actor,'create','service',cur.lastrowid,body)
+            elif path=='/api/products':
+                if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền thêm sản phẩm"})
+                name=body.get('name','').strip(); sku=body.get('sku','').strip(); stock=int(body.get('stock',0)); price=float(body.get('price',0)); reorder=int(body.get('reorder_level',5))
+                if not name or not sku or stock<0 or price<0:return self.json(422,{"error":"Dữ liệu sản phẩm không hợp lệ"})
+                bid=body.get('branch_id') if actor['role']=='admin' else actor['branch_id']; cur=con.execute("INSERT INTO products(branch_id,sku,name,stock,reorder_level,price) VALUES(?,?,?,?,?,?)",(bid,sku,name,stock,reorder,price)); self.audit(con,actor,'create','product',cur.lastrowid,body)
             elif path=='/api/stock-movements':
                 if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền điều chỉnh kho"})
                 product_id=int(body.get('product_id',0)); quantity=int(body.get('quantity',0)); movement=body.get('movement_type')
@@ -180,6 +202,14 @@ class App(SimpleHTTPRequestHandler):
                 remaining=round(invoice['total']-invoice['paid'],2)
                 if amount>remaining:return self.json(422,{"error":"Số tiền vượt quá công nợ còn lại"})
                 new_paid=round(invoice['paid']+amount,2); status='paid' if new_paid>=invoice['total'] else 'partial'; cur=con.execute("INSERT INTO payments(invoice_id,amount,method,paid_at) VALUES(?,?,?,?)",(invoice_id,amount,body.get('method','cash'),datetime.now().isoformat())); con.execute("UPDATE invoices SET paid=?,status=? WHERE id=?",(new_paid,status,invoice_id)); self.audit(con,actor,'payment','invoice',invoice_id,{"payment_id":cur.lastrowid,"amount":amount})
+            elif path=='/api/settings':
+                if actor['role']!='admin': return self.json(403,{"error":"Chỉ Admin được thay đổi cài đặt hệ thống"})
+                updates=body.get('settings',{})
+                if not isinstance(updates,dict) or not updates:return self.json(422,{"error":"Không có cài đặt hợp lệ"})
+                for key,value in updates.items():
+                    if key not in ('spa_name','support_phone','currency'):return self.json(422,{"error":"Khóa cài đặt không hợp lệ"})
+                    con.execute("INSERT INTO application_settings(setting_key,setting_value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at",(key,str(value).strip(),datetime.now().isoformat()))
+                self.audit(con,actor,'update','settings',None,updates)
             else:return self.json(404,{"error":"API không tồn tại"})
             con.commit(); self.json(201,{"ok":True})
         except sqlite3.IntegrityError as e: con.rollback(); self.json(409,{"error":"Dữ liệu bị trùng hoặc không hợp lệ","detail":str(e)})
@@ -201,6 +231,20 @@ class App(SimpleHTTPRequestHandler):
                 aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM appointments WHERE id=?",(aid,)).fetchone())
                 if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
                 con.execute("UPDATE appointments SET starts_at=?,staff_name=?,status=?,note=? WHERE id=?",(body.get('starts_at',current['starts_at']),body.get('staff_name',current['staff_name']),body.get('status',current['status']),body.get('note',current['note']),aid)); self.audit(con,actor,'update','appointment',aid,body)
+            elif path.startswith('/api/services/'):
+                if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền sửa dịch vụ"})
+                sid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM services WHERE id=?",(sid,)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy dịch vụ"})
+                name=body.get('name',current['name']).strip(); duration=int(body.get('duration_min',current['duration_min'])); price=float(body.get('price',current['price']))
+                if not name or duration<=0 or price<0:return self.json(422,{"error":"Dữ liệu dịch vụ không hợp lệ"})
+                con.execute("UPDATE services SET name=?,duration_min=?,price=?,active=? WHERE id=?",(name,duration,price,int(body.get('active',current['active'])),sid)); self.audit(con,actor,'update','service',sid,body)
+            elif path.startswith('/api/products/'):
+                if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền sửa sản phẩm"})
+                pid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy sản phẩm"})
+                name=body.get('name',current['name']).strip(); price=float(body.get('price',current['price'])); reorder=int(body.get('reorder_level',current['reorder_level']))
+                if not name or price<0 or reorder<0:return self.json(422,{"error":"Dữ liệu sản phẩm không hợp lệ"})
+                con.execute("UPDATE products SET name=?,price=?,reorder_level=? WHERE id=?",(name,price,reorder,pid)); self.audit(con,actor,'update','product',pid,body)
             else:return self.json(404,{"error":"API không tồn tại"})
             con.commit(); self.json(200,{"ok":True})
         finally: con.close()
