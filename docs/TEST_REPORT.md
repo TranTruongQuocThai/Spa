@@ -4,4 +4,4 @@ Automated API regression tests live in `tests/test_api.py`. Run `python3 -m unit
 
 Browser E2E has not run: Node/Playwright are not installed in this execution environment. Static UI wiring now also covers mobile drawer ARIA, overlay, Escape, navigation close, focus return and responsive CSS; manual viewport verification remains required. See `RESPONSIVE_TEST.md`.
 
-Latest local regression run: 7/7 tests pass after wiring invoice search/payment UI. Static route checks confirm that services, inventory, finance, reports and settings resolve to real module screens rather than the generic placeholder.
+Latest local regression run: 8/8 tests pass after introducing the generic module CRUD API. Static route checks confirm that no navigation item uses the former generic “no API” placeholder.

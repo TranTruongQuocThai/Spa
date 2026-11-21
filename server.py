@@ -11,6 +11,14 @@ ROOT = Path(__file__).parent
 DB = Path(os.getenv("SPAFLOW_DATABASE", str(ROOT / "database" / "spaflow_test.sqlite3")))
 SESSIONS = {}
 ROLES = {"admin", "cskh", "manager", "student"}
+MODULE_ACCESS = {
+    "branches": {"admin"}, "staff": {"admin","manager"}, "rooms": {"admin","manager"},
+    "leads": {"admin","cskh","manager"}, "aftercare": {"admin","cskh"}, "messages": {"admin","cskh"},
+    "schedule": {"admin","manager","student"}, "results": {"admin","manager","student"},
+    "tuition": {"admin","manager","student"}, "materials": {"admin","manager","student"},
+    "profile": {"admin","cskh","manager","student"}, "finance": {"admin","manager"},
+    "reports": {"admin","manager","cskh"}, "settings": {"admin"}
+}
 
 def db():
     con = sqlite3.connect(DB)
@@ -43,12 +51,18 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS stock_movements(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, product_id INTEGER NOT NULL, movement_type TEXT NOT NULL, quantity INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(product_id) REFERENCES products(id));
     CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY, user_id INTEGER, branch_id INTEGER, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, payload TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS application_settings(setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS module_records(id INTEGER PRIMARY KEY, branch_id INTEGER, owner_user_id INTEGER, module_key TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', details TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(owner_user_id) REFERENCES users(id));
     """)
     if first:
         seed(con)
     else:
         now=datetime.now().isoformat(timespec="seconds")
         con.executemany("INSERT OR IGNORE INTO application_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",[("spa_name","SpaFlow",now),("support_phone","0900 000 000",now),("currency","VND",now)])
+        if not con.execute("SELECT 1 FROM module_records LIMIT 1").fetchone():
+            defaults={"branches":"Chi nhánh mẫu","staff":"Nhân sự mẫu","rooms":"Phòng dịch vụ mẫu","leads":"Lead tư vấn mẫu","aftercare":"Chăm sóc sau điều trị mẫu","messages":"Tin nhắn mẫu","schedule":"Lịch học mẫu","results":"Kết quả học tập mẫu","tuition":"Học phí mẫu","materials":"Tài liệu học tập mẫu","profile":"Hồ sơ cá nhân"}
+            for key,title in defaults.items():
+                owner=4 if key in {"schedule","results","tuition","materials","profile"} else None
+                con.execute("INSERT INTO module_records(branch_id,owner_user_id,module_key,title,status,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(1,owner,key,title,'active','Dữ liệu mẫu',now,now))
     con.commit(); con.close()
 
 def seed(con):
@@ -76,6 +90,10 @@ def seed(con):
     for i in range(1,201): con.execute("INSERT INTO class_sessions(class_id,starts_at,ends_at,room,is_open) VALUES(?,?,?,?,?)",((i-1)%15+1,(base+timedelta(days=i-100)).isoformat(),(base+timedelta(days=i-100,hours=3)).isoformat(),"Phòng học A",1))
     for i in range(1,31): con.execute("INSERT INTO invoices(branch_id,customer_id,code,total,paid,status,created_at) VALUES(?,?,?,?,?,?,?)",((i-1)%3+1,i,f"HD{i:05d}",800000+i*100000,800000+i*50000,"paid" if i%2 else "partial",now))
     con.executemany("INSERT INTO application_settings(setting_key,setting_value,updated_at) VALUES(?,?,?)",[("spa_name","SpaFlow",now),("support_phone","0900 000 000",now),("currency","VND",now)])
+    module_titles={"branches":"Chi nhánh","staff":"Nhân sự","rooms":"Phòng dịch vụ","leads":"Lead tư vấn","aftercare":"Chăm sóc sau điều trị","messages":"Tin nhắn","schedule":"Lịch học","results":"Kết quả học tập","tuition":"Học phí","materials":"Tài liệu học tập","profile":"Hồ sơ cá nhân","finance":"Thu chi","reports":"Báo cáo"}
+    for key,label in module_titles.items():
+        owner=4 if key in {"schedule","results","tuition","materials","profile"} else None
+        con.execute("INSERT INTO module_records(branch_id,owner_user_id,module_key,title,status,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(1,owner,key,f"{label} mẫu",'active',f"Dữ liệu mẫu cho {label.lower()}",now,now))
 
 def row(x): return dict(x) if x else None
 def rows(xs): return [dict(x) for x in xs]
@@ -100,6 +118,13 @@ class App(SimpleHTTPRequestHandler):
         if actor['role']=='student': return "",[]
         return f" WHERE {table_branch}=?",[actor['branch_id']]
     def audit(self,con,actor,action,entity,eid=None,payload=None): con.execute("INSERT INTO audit_logs(user_id,branch_id,action,entity,entity_id,payload,created_at) VALUES(?,?,?,?,?,?,?)",(actor['id'],actor['branch_id'],action,entity,eid,json.dumps(payload or {}),datetime.now().isoformat()))
+    def module_authorized(self,actor,key,write=False):
+        allowed=MODULE_ACCESS.get(key)
+        if not allowed or actor['role'] not in allowed:
+            self.json(403,{"error":"Bạn không có quyền truy cập module này"}); return False
+        if write and actor['role']=='student':
+            self.json(403,{"error":"Học viên chỉ có quyền xem dữ liệu cá nhân"}); return False
+        return True
     def do_GET(self):
         p=urlparse(self.path); path=p.path
         if not path.startswith('/api/'):
@@ -143,6 +168,12 @@ class App(SimpleHTTPRequestHandler):
             elif path=='/api/settings':
                 if actor['role']!='admin': return self.json(403,{"error":"Chỉ Admin được xem cài đặt hệ thống"})
                 data=rows(con.execute("SELECT setting_key,setting_value FROM application_settings ORDER BY setting_key"))
+            elif path.startswith('/api/modules/'):
+                key=path.rsplit('/',1)[1]
+                if not self.module_authorized(actor,key): return
+                if actor['role']=='student': data=rows(con.execute("SELECT * FROM module_records WHERE module_key=? AND owner_user_id=? ORDER BY updated_at DESC",(key,actor['id'])))
+                elif actor['role']=='admin': data=rows(con.execute("SELECT * FROM module_records WHERE module_key=? ORDER BY updated_at DESC",(key,)))
+                else: data=rows(con.execute("SELECT * FROM module_records WHERE module_key=? AND branch_id=? ORDER BY updated_at DESC",(key,actor['branch_id'])))
             else: return self.json(404,{"error":"API không tồn tại"})
             self.json(200,{"data":data})
         finally: con.close()
@@ -210,6 +241,12 @@ class App(SimpleHTTPRequestHandler):
                     if key not in ('spa_name','support_phone','currency'):return self.json(422,{"error":"Khóa cài đặt không hợp lệ"})
                     con.execute("INSERT INTO application_settings(setting_key,setting_value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at",(key,str(value).strip(),datetime.now().isoformat()))
                 self.audit(con,actor,'update','settings',None,updates)
+            elif path.startswith('/api/modules/'):
+                key=path.rsplit('/',1)[1]
+                if not self.module_authorized(actor,key,True): return
+                title=body.get('title','').strip(); details=body.get('details','').strip(); status=body.get('status','active')
+                if not title:return self.json(422,{"error":"Tên bản ghi là bắt buộc"})
+                bid=body.get('branch_id') if actor['role']=='admin' else actor['branch_id']; now=datetime.now().isoformat(); cur=con.execute("INSERT INTO module_records(branch_id,owner_user_id,module_key,title,status,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(bid,None,key,title,status,details,now,now)); self.audit(con,actor,'create',key,cur.lastrowid,body)
             else:return self.json(404,{"error":"API không tồn tại"})
             con.commit(); self.json(201,{"ok":True})
         except sqlite3.IntegrityError as e: con.rollback(); self.json(409,{"error":"Dữ liệu bị trùng hoặc không hợp lệ","detail":str(e)})
@@ -245,19 +282,34 @@ class App(SimpleHTTPRequestHandler):
                 name=body.get('name',current['name']).strip(); price=float(body.get('price',current['price'])); reorder=int(body.get('reorder_level',current['reorder_level']))
                 if not name or price<0 or reorder<0:return self.json(422,{"error":"Dữ liệu sản phẩm không hợp lệ"})
                 con.execute("UPDATE products SET name=?,price=?,reorder_level=? WHERE id=?",(name,price,reorder,pid)); self.audit(con,actor,'update','product',pid,body)
+            elif path.startswith('/api/modules/'):
+                pieces=path.split('/'); key=pieces[-2]; rid=int(pieces[-1])
+                if not self.module_authorized(actor,key,True): return
+                current=row(con.execute("SELECT * FROM module_records WHERE id=? AND module_key=?",(rid,key)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy bản ghi"})
+                title=body.get('title',current['title']).strip(); details=body.get('details',current['details']).strip(); status=body.get('status',current['status'])
+                if not title:return self.json(422,{"error":"Tên bản ghi là bắt buộc"})
+                con.execute("UPDATE module_records SET title=?,details=?,status=?,updated_at=? WHERE id=?",(title,details,status,datetime.now().isoformat(),rid)); self.audit(con,actor,'update',key,rid,body)
             else:return self.json(404,{"error":"API không tồn tại"})
             con.commit(); self.json(200,{"ok":True})
         finally: con.close()
     def do_DELETE(self):
         path=urlparse(self.path).path; actor=self.require()
         if not actor:return
-        if not path.startswith('/api/appointments/'):return self.json(404,{"error":"API không tồn tại"})
-        if actor['role'] not in ('admin','cskh','manager'):return self.json(403,{"error":"Không có quyền hủy lịch hẹn"})
         con=db()
         try:
-            aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM appointments WHERE id=?",(aid,)).fetchone())
-            if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']):return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
-            con.execute("UPDATE appointments SET status='cancelled' WHERE id=?",(aid,)); self.audit(con,actor,'cancel','appointment',aid); con.commit(); self.json(200,{"ok":True})
+            if path.startswith('/api/appointments/'):
+                if actor['role'] not in ('admin','cskh','manager'):return self.json(403,{"error":"Không có quyền hủy lịch hẹn"})
+                aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM appointments WHERE id=?",(aid,)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']):return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
+                con.execute("UPDATE appointments SET status='cancelled' WHERE id=?",(aid,)); self.audit(con,actor,'cancel','appointment',aid); con.commit(); return self.json(200,{"ok":True})
+            if path.startswith('/api/modules/'):
+                pieces=path.split('/'); key=pieces[-2]; rid=int(pieces[-1])
+                if not self.module_authorized(actor,key,True): return
+                current=row(con.execute("SELECT * FROM module_records WHERE id=? AND module_key=?",(rid,key)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']):return self.json(404,{"error":"Không tìm thấy bản ghi"})
+                con.execute("DELETE FROM module_records WHERE id=?",(rid,)); self.audit(con,actor,'delete',key,rid); con.commit(); return self.json(200,{"ok":True})
+            return self.json(404,{"error":"API không tồn tại"})
         finally: con.close()
 
 if __name__=='__main__':

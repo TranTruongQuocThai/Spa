@@ -13,6 +13,7 @@
 | Invoices / payments | Working foundation | Branch-scoped invoice list, search/filter, payment form and transactional partial/full payment API |
 | Reports | Working foundation | Branch-scoped revenue, paid/debt, appointment status and low-stock overview |
 | System settings | Working foundation | Admin-only persisted spa name, support number and currency configuration |
-| Commissions, cash, messages, assignments, certificates | Not implemented | Database/API work remains |
-| UI integration with API | In progress | Dashboard, CRM, appointment, services, inventory, reports and settings use API; remaining modules use existing MVP screens |
+| Shared module records | Working foundation | API-backed CRUD/search/filter for branches, staff, rooms, leads, aftercare, messages, schedules, results, tuition, materials and profile; role/branch scope enforced |
+| Commissions, cash, assignments, certificates | Not implemented | Domain-specific database/API work remains |
+| UI integration with API | In progress | No navigation item shows the former generic “no API” placeholder; specialized and generic module screens use API |
 | Shared responsive shell | Code complete | Mobile sidebar overlay/close/Escape/navigation close, focus return, scroll lock, safe-area drawer/modal rules; browser viewport run pending |
