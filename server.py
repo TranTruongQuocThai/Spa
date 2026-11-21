@@ -40,6 +40,8 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, name TEXT NOT NULL, duration_min INTEGER NOT NULL, price REAL NOT NULL, active INTEGER DEFAULT 1, FOREIGN KEY(branch_id) REFERENCES branches(id));
     CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, sku TEXT NOT NULL, name TEXT NOT NULL, stock INTEGER NOT NULL DEFAULT 0, reorder_level INTEGER DEFAULT 5, price REAL NOT NULL, UNIQUE(branch_id,sku), FOREIGN KEY(branch_id) REFERENCES branches(id));
     CREATE TABLE IF NOT EXISTS appointments(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, customer_id INTEGER NOT NULL, service_id INTEGER, starts_at TEXT NOT NULL, staff_name TEXT, status TEXT NOT NULL DEFAULT 'confirmed', note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(customer_id) REFERENCES customers(id), FOREIGN KEY(service_id) REFERENCES services(id));
+    CREATE TABLE IF NOT EXISTS service_rooms(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, name TEXT NOT NULL, active INTEGER DEFAULT 1, FOREIGN KEY(branch_id) REFERENCES branches(id));
+    CREATE TABLE IF NOT EXISTS appointment_events(id INTEGER PRIMARY KEY, appointment_id INTEGER NOT NULL, event_type TEXT NOT NULL, from_status TEXT, to_status TEXT, reason TEXT, actor_user_id INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(appointment_id) REFERENCES appointments(id), FOREIGN KEY(actor_user_id) REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS courses(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, tuition REAL NOT NULL, FOREIGN KEY(branch_id) REFERENCES branches(id));
     CREATE TABLE IF NOT EXISTS classes(id INTEGER PRIMARY KEY, branch_id INTEGER NOT NULL, course_id INTEGER NOT NULL, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, teacher_name TEXT NOT NULL, starts_on TEXT, ends_on TEXT, schedule_text TEXT, status TEXT NOT NULL DEFAULT 'active', FOREIGN KEY(branch_id) REFERENCES branches(id), FOREIGN KEY(course_id) REFERENCES courses(id));
     CREATE TABLE IF NOT EXISTS students(id INTEGER PRIMARY KEY, user_id INTEGER UNIQUE, code TEXT UNIQUE NOT NULL, full_name TEXT NOT NULL, phone TEXT, branch_id INTEGER NOT NULL, enrolled_on TEXT, status TEXT DEFAULT 'active', FOREIGN KEY(user_id) REFERENCES users(id), FOREIGN KEY(branch_id) REFERENCES branches(id));
@@ -61,6 +63,9 @@ def init_db(reset=False):
     CREATE TABLE IF NOT EXISTS work_shifts(id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, branch_id INTEGER NOT NULL, starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, shift_status TEXT NOT NULL DEFAULT 'scheduled' CHECK(shift_status IN ('scheduled','completed','cancelled')), note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(staff_id) REFERENCES staff_profiles(id), FOREIGN KEY(branch_id) REFERENCES branches(id));
     CREATE TABLE IF NOT EXISTS staff_attendance_records(id INTEGER PRIMARY KEY, staff_id INTEGER NOT NULL, shift_id INTEGER, check_type TEXT NOT NULL CHECK(check_type IN ('check_in','check_out')), checked_at TEXT NOT NULL, photo_data TEXT, latitude REAL, longitude REAL, accuracy_m REAL, verification_status TEXT NOT NULL DEFAULT 'pending' CHECK(verification_status IN ('verified','pending','rejected')), note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(staff_id) REFERENCES staff_profiles(id), FOREIGN KEY(shift_id) REFERENCES work_shifts(id));
     """)
+    columns={x[1] for x in con.execute("PRAGMA table_info(appointments)")}
+    for name,definition in [('staff_id','INTEGER'),('room_id','INTEGER'),('duration_min','INTEGER DEFAULT 60'),('checked_in_at','TEXT'),('started_at','TEXT'),('completed_at','TEXT'),('cancel_reason','TEXT'),('invoice_id','INTEGER')]:
+        if name not in columns: con.execute(f"ALTER TABLE appointments ADD COLUMN {name} {definition}")
     if first:
         seed(con)
     else:
@@ -73,6 +78,7 @@ def init_db(reset=False):
                 con.execute("INSERT INTO module_records(branch_id,owner_user_id,module_key,title,status,details,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(1,owner,key,title,'active','Dữ liệu mẫu',now,now))
         seed_staff_access(con)
     seed_staff_access(con)
+    seed_appointment_rooms(con)
     con.commit(); con.close()
 
 def seed_staff_access(con):
@@ -108,6 +114,11 @@ def seed_staff_access(con):
     for user_id,role_code,branch_id in [(1,'admin',None),(2,'cskh',1),(3,'manager',1)]:
         role_id=con.execute("SELECT id FROM access_roles WHERE code=?",(role_code,)).fetchone()[0]
         con.execute("INSERT OR IGNORE INTO user_role_assignments(user_id,role_id,branch_id,assigned_at) VALUES(?,?,?,?)",(user_id,role_id,branch_id,now))
+
+def seed_appointment_rooms(con):
+    for branch_id in range(1,4):
+        for name in ('Phòng 1','Phòng 2','Phòng VIP'):
+            con.execute("INSERT INTO service_rooms(branch_id,name,active) SELECT ?,?,1 WHERE NOT EXISTS(SELECT 1 FROM service_rooms WHERE branch_id=? AND name=?)",(branch_id,name,branch_id,name))
 
 def seed(con):
     branches=[("Q1","SpaFlow Quận 1","123 Nguyễn Trãi, Quận 1",10.7749,106.7009), ("Q7","SpaFlow Quận 7","56 Trần Xuân Soạn, Quận 7",10.7350,106.7050), ("TD","SpaFlow Thủ Đức","9 Võ Văn Ngân, Thủ Đức",10.8506,106.7719)]
@@ -182,6 +193,23 @@ class App(SimpleHTTPRequestHandler):
         if not self.has_permission(con,actor,permission):
             self.json(403,{"error":"Bạn không có quyền nhân sự phù hợp cho thao tác này"}); return False
         return True
+    def appointment_allowed(self,actor):
+        if actor['role'] not in ('admin','cskh','manager'):
+            self.json(403,{"error":"Bạn không có quyền quản lý lịch hẹn"}); return False
+        return True
+    def appointment_conflict(self,con,branch_id,starts_at,duration_min,staff_id=None,room_id=None,exclude_id=None):
+        end_at=(datetime.fromisoformat(starts_at)+timedelta(minutes=int(duration_min))).isoformat()
+        filters=["branch_id=?","status NOT IN ('cancelled','completed','no_show')","starts_at < ?","datetime(starts_at,'+' || COALESCE(duration_min,60) || ' minutes') > ?"]
+        args=[branch_id,end_at,starts_at]
+        resources=[]
+        if staff_id: resources.append(('staff_id',int(staff_id)))
+        if room_id: resources.append(('room_id',int(room_id)))
+        if not resources:return None
+        resource_sql=' OR '.join(f"{field}=?" for field,_ in resources); args.extend(value for _,value in resources); filters.append('('+resource_sql+')')
+        if exclude_id: filters.append('id<>?'); args.append(exclude_id)
+        return row(con.execute("SELECT * FROM appointments WHERE "+' AND '.join(filters)+" LIMIT 1",args).fetchone())
+    def appointment_event(self,con,actor,appointment_id,event_type,from_status=None,to_status=None,reason=None):
+        con.execute("INSERT INTO appointment_events(appointment_id,event_type,from_status,to_status,reason,actor_user_id,created_at) VALUES(?,?,?,?,?,?,?)",(appointment_id,event_type,from_status,to_status,reason,actor['id'],datetime.now().isoformat()))
     def do_GET(self):
         p=urlparse(self.path); path=p.path
         if not path.startswith('/api/'):
@@ -234,8 +262,30 @@ class App(SimpleHTTPRequestHandler):
                 clause,args=self.where(actor); data={"customers":con.execute("SELECT count(*) FROM customers"+clause,args).fetchone()[0],"appointments":con.execute("SELECT count(*) FROM appointments"+clause,args).fetchone()[0],"students":con.execute("SELECT count(*) FROM students"+clause,args).fetchone()[0],"revenue":con.execute("SELECT COALESCE(sum(total),0) FROM invoices"+clause,args).fetchone()[0]}
             elif path=='/api/customers':
                 clause,args=self.where(actor); term=q.get('q',[''])[0]; more=" AND" if clause else " WHERE"; data=rows(con.execute("SELECT * FROM customers"+clause+(more+" (full_name LIKE ? OR phone LIKE ?)") if term else "SELECT * FROM customers"+clause,args+([f'%{term}%',f'%{term}%'] if term else [])))
+            elif path=='/api/appointment-resources':
+                if not self.appointment_allowed(actor): return
+                clause,args=self.where(actor); staff_args=[] if actor['role']=='admin' else [actor['branch_id']]; staff_sql="SELECT sp.id,sp.full_name,sp.position_title FROM staff_profiles sp WHERE sp.employment_status='active'"+(" AND EXISTS (SELECT 1 FROM staff_branches sb WHERE sb.staff_id=sp.id AND sb.branch_id=?)" if staff_args else ''); data={"customers":rows(con.execute("SELECT id,full_name,phone FROM customers"+clause+" ORDER BY full_name LIMIT 200",args)),"services":rows(con.execute("SELECT * FROM services"+clause+" AND active=1" if clause else "SELECT * FROM services WHERE active=1",args)),"staff":rows(con.execute(staff_sql,staff_args)),"rooms":rows(con.execute("SELECT * FROM service_rooms"+clause+" AND active=1" if clause else "SELECT * FROM service_rooms WHERE active=1",args))}
+            elif path=='/api/appointments/availability':
+                if not self.appointment_allowed(actor): return
+                date=q.get('date',[datetime.now().date().isoformat()])[0]; duration=int(q.get('duration_min',[60])[0]); staff_id=q.get('staff_id',[None])[0]; room_id=q.get('room_id',[None])[0]; branch_id=int(q.get('branch_id',['1'])[0]) if actor['role']=='admin' else actor['branch_id']; slots=[]
+                for hour in range(8,19):
+                    starts_at=f"{date}T{hour:02d}:00:00"
+                    if not self.appointment_conflict(con,branch_id,starts_at,duration,staff_id,room_id): slots.append(starts_at)
+                data={"slots":slots,"duration_min":duration}
             elif path=='/api/appointments':
-                clause,args=self.where(actor); data=rows(con.execute("SELECT a.*,c.full_name customer_name,s.name service_name FROM appointments a JOIN customers c ON c.id=a.customer_id LEFT JOIN services s ON s.id=a.service_id"+clause.replace('branch_id','a.branch_id')+" ORDER BY starts_at LIMIT 100",args))
+                if not self.appointment_allowed(actor): return
+                clause,args=self.where(actor); status=q.get('status',[''])[0]; date=q.get('date',[''])[0]; conditions=[]
+                if status: conditions.append(('a.status=?',status))
+                if date: conditions.append(("date(a.starts_at)=?",date))
+                base="SELECT a.*,c.full_name customer_name,s.name service_name,r.name room_name,sp.full_name staff_full_name FROM appointments a JOIN customers c ON c.id=a.customer_id LEFT JOIN services s ON s.id=a.service_id LEFT JOIN service_rooms r ON r.id=a.room_id LEFT JOIN staff_profiles sp ON sp.id=a.staff_id"+clause.replace('branch_id','a.branch_id')
+                values=list(args)
+                for condition,value in conditions: base+=(" AND " if ' WHERE ' in base else " WHERE ")+condition; values.append(value)
+                data=rows(con.execute(base+" ORDER BY a.starts_at LIMIT 200",values))
+            elif path.startswith('/api/appointments/'):
+                if not self.appointment_allowed(actor): return
+                aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT a.*,c.full_name customer_name,s.name service_name FROM appointments a JOIN customers c ON c.id=a.customer_id LEFT JOIN services s ON s.id=a.service_id WHERE a.id=?",(aid,)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']):return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
+                data={"appointment":current,"events":rows(con.execute("SELECT ae.*,u.full_name actor_name FROM appointment_events ae LEFT JOIN users u ON u.id=ae.actor_user_id WHERE ae.appointment_id=? ORDER BY ae.created_at DESC",(aid,)))}
             elif path=='/api/classes':
                 clause,args=self.where(actor); data=rows(con.execute("SELECT cl.*,co.name course_name,b.name branch_name,count(e.id) student_count FROM classes cl JOIN courses co ON co.id=cl.course_id JOIN branches b ON b.id=cl.branch_id LEFT JOIN enrollments e ON e.class_id=cl.id"+clause.replace('branch_id','cl.branch_id')+" GROUP BY cl.id ORDER BY cl.id",args))
             elif path.startswith('/api/classes/') and path.endswith('/students'):
@@ -332,7 +382,10 @@ class App(SimpleHTTPRequestHandler):
                 if actor['role'] not in ('admin','cskh','manager'): return self.json(403,{"error":"Không có quyền đặt lịch"})
                 for k in ('customer_id','starts_at'):
                     if not body.get(k): return self.json(422,{"error":"Thiếu trường "+k})
-                bid=body.get('branch_id') if actor['role']=='admin' else actor['branch_id']; cur=con.execute("INSERT INTO appointments(branch_id,customer_id,service_id,starts_at,staff_name,status,note,created_at) VALUES(?,?,?,?,?,?,?,?)",(bid,body['customer_id'],body.get('service_id'),body['starts_at'],body.get('staff_name','Chưa phân công'),'pending',body.get('note',''),datetime.now().isoformat())); self.audit(con,actor,'create','appointment',cur.lastrowid,body)
+                bid=body.get('branch_id') if actor['role']=='admin' else actor['branch_id']; service_id=body.get('service_id'); service=row(con.execute("SELECT duration_min FROM services WHERE id=?",(service_id,)).fetchone()) if service_id else None; duration=int(body.get('duration_min') or (service['duration_min'] if service else 60)); staff_id=body.get('staff_id'); room_id=body.get('room_id')
+                conflict=self.appointment_conflict(con,bid,body['starts_at'],duration,staff_id,room_id)
+                if conflict:return self.json(409,{"error":"Trùng lịch nhân viên hoặc phòng trong khung giờ đã chọn"})
+                cur=con.execute("INSERT INTO appointments(branch_id,customer_id,service_id,starts_at,staff_name,staff_id,room_id,duration_min,status,note,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(bid,body['customer_id'],service_id,body['starts_at'],body.get('staff_name','Chưa phân công'),staff_id,room_id,duration,'pending',body.get('note',''),datetime.now().isoformat())); self.appointment_event(con,actor,cur.lastrowid,'created',None,'pending'); self.audit(con,actor,'create','appointment',cur.lastrowid,body)
             elif path=='/api/attendance':
                 if actor['role']!='student': return self.json(403,{"error":"Chỉ học viên được tự điểm danh"})
                 student=row(con.execute("SELECT * FROM students WHERE user_id=?",(actor['id'],)).fetchone()); session_id=int(body.get('session_id',0)); session=row(con.execute("SELECT cs.*,c.branch_id FROM class_sessions cs JOIN classes c ON c.id=cs.class_id WHERE cs.id=?",(session_id,)).fetchone())
@@ -441,7 +494,18 @@ class App(SimpleHTTPRequestHandler):
                 if actor['role'] not in ('admin','cskh','manager'): return self.json(403,{"error":"Không có quyền sửa lịch hẹn"})
                 aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM appointments WHERE id=?",(aid,)).fetchone())
                 if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
-                con.execute("UPDATE appointments SET starts_at=?,staff_name=?,status=?,note=? WHERE id=?",(body.get('starts_at',current['starts_at']),body.get('staff_name',current['staff_name']),body.get('status',current['status']),body.get('note',current['note']),aid)); self.audit(con,actor,'update','appointment',aid,body)
+                starts_at=body.get('starts_at',current['starts_at']); duration=int(body.get('duration_min',current['duration_min'] or 60)); staff_id=body.get('staff_id',current['staff_id']); room_id=body.get('room_id',current['room_id']); conflict=self.appointment_conflict(con,current['branch_id'],starts_at,duration,staff_id,room_id,aid)
+                if conflict:return self.json(409,{"error":"Trùng lịch nhân viên hoặc phòng trong khung giờ đã chọn"})
+                status=body.get('status',current['status']); allowed={'pending','confirmed','in_progress','completed','cancelled','no_show'}
+                if status not in allowed:return self.json(422,{"error":"Trạng thái lịch hẹn không hợp lệ"})
+                extra=''; values=[starts_at,body.get('staff_name',current['staff_name']),staff_id,room_id,duration,status,body.get('note',current['note'])]
+                if status=='confirmed':extra=', checked_in_at=checked_in_at'
+                if status=='in_progress':extra=', started_at=COALESCE(started_at,?)'; values.append(datetime.now().isoformat())
+                if status=='completed':
+                    extra=', completed_at=COALESCE(completed_at,?)'; values.append(datetime.now().isoformat())
+                    if not current['invoice_id']:
+                        service=row(con.execute("SELECT price FROM services WHERE id=?",(current['service_id'],)).fetchone()); total=service['price'] if service else 0; invoice=con.execute("INSERT INTO invoices(branch_id,customer_id,code,total,paid,status,created_at) VALUES(?,?,?,?,0,'unpaid',?)",(current['branch_id'],current['customer_id'],f"HD{int(datetime.now().timestamp())}",total,datetime.now().isoformat())); extra+=', invoice_id=?'; values.append(invoice.lastrowid)
+                values.append(aid); con.execute("UPDATE appointments SET starts_at=?,staff_name=?,staff_id=?,room_id=?,duration_min=?,status=?,note=?"+extra+" WHERE id=?",values); self.appointment_event(con,actor,'status_change' and aid,'status_change',current['status'],status,body.get('reason')); self.audit(con,actor,'update','appointment',aid,body)
             elif path.startswith('/api/services/'):
                 if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền sửa dịch vụ"})
                 sid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM services WHERE id=?",(sid,)).fetchone())
