@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SpaFlow — Quản lý Spa</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="lotus">✦</span><div><b>SpaFlow</b><small>SPA MANAGEMENT</small></div></div>
+    <button class="identity" id="roleButton"><span class="avatar">A</span><span><b id="roleName">Admin</b><small id="roleCaption">Quản trị hệ thống</small></span><span>⌄</span></button>
+    <nav id="nav"></nav>
+    <div class="sidebar-help">◌ <span>Hướng dẫn sử dụng</span></div>
+  </aside>
+  <main>
+    <header class="topbar"><button class="mobile-menu" id="mobileMenu">☰</button><button class="branch" id="branchButton">⌂ <span>Chi nhánh: <b id="branchName">SpaFlow Quận 1</b></span>⌄</button><label class="search">⌕ <input id="globalSearch" placeholder="Tìm khách hàng, SĐT, dịch vụ..."></label><div class="top-actions"><button title="Thông báo">♧<i>3</i></button><button id="guide">? <span>Hướng dẫn</span></button><button class="profile">👩🏻 <span>Nguyễn Thị Mai<br><small id="profileRole">Quản trị hệ thống</small></span>⌄</button></div></header>
+    <section class="hero"><div><p class="eyebrow">✦ SpaFlow quản trị hệ thống</p><h1 id="greeting">Xin chào, Admin! <span>👋</span></h1><p id="heroCopy">Tổng quan hoạt động của hệ thống hôm nay</p></div><div class="hero-art">🪷 <span>🧴</span> 🌿</div><div class="quick" id="quick"></div></section>
+    <div id="page"></div>
+  </main>
+</div>
+<div id="toast" role="status"></div><div id="modalRoot"></div>
+<script src="app.js"></script>
+</body></html>
