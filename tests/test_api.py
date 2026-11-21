@@ -1,0 +1,27 @@
+import json, os, sys, tempfile, threading, unittest
+from urllib.parse import quote
+from http.client import HTTPConnection
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+import server
+from http.server import ThreadingHTTPServer
+
+class ApiTests(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):
+  cls.old=server.DB; cls.tmp=Path(tempfile.gettempdir())/'spaflow_test_api.sqlite3'; server.DB=cls.tmp; server.SESSIONS.clear(); server.init_db(True); cls.http=ThreadingHTTPServer(('127.0.0.1',0),server.App); cls.port=cls.http.server_address[1]; cls.thread=threading.Thread(target=cls.http.serve_forever,daemon=True); cls.thread.start()
+ @classmethod
+ def tearDownClass(cls): cls.http.shutdown(); server.DB.unlink(missing_ok=True); server.DB=cls.old
+ def call(self,method,path,data=None,token=None):
+  h={'Content-Type':'application/json'}
+  if token:h['Authorization']='Bearer '+token
+  c=HTTPConnection('127.0.0.1',self.port); c.request(method,path,json.dumps(data or {}),h); r=c.getresponse(); return r.status,json.loads(r.read())
+ def login(self,u,p):
+  s,d=self.call('POST','/api/login',{'username':u,'password':p}); self.assertEqual(s,200); return d['token']
+ def test_login_and_branch_scope(self):
+  t=self.login('manager.q1','manager'); s,d=self.call('GET','/api/customers',token=t); self.assertEqual(s,200); self.assertTrue(all(x['branch_id']==1 for x in d['data']))
+ def test_customer_and_appointment(self):
+  t=self.login('cskh','cskh'); s,_=self.call('POST','/api/customers',{'full_name':'Khách API','phone':'0911111111'},t); self.assertEqual(s,201); s,d=self.call('GET','/api/customers?q='+quote('Khách API'),token=t); self.assertEqual(s,200); cid=d['data'][0]['id']; s,_=self.call('POST','/api/appointments',{'customer_id':cid,'starts_at':'2026-11-25T09:00:00'},t); self.assertEqual(s,201)
+ def test_attendance_protection(self):
+  t=self.login('student.mai','student'); s,d=self.call('POST','/api/attendance',{'session_id':1},t); self.assertEqual(s,201); s,d=self.call('POST','/api/attendance',{'session_id':1},t); self.assertEqual(s,409)
+if __name__=='__main__': unittest.main()
