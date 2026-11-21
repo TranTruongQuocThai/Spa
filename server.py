@@ -207,6 +207,16 @@ class App(SimpleHTTPRequestHandler):
                     clause,args=("",[]) if actor['role']=='admin' else (" WHERE EXISTS (SELECT 1 FROM staff_branches sb WHERE sb.staff_id=sa.staff_id AND sb.branch_id=?)",[actor['branch_id']])
                 else: clause,args=(" WHERE sp.user_id=?",[actor['id']])
                 data=rows(con.execute("SELECT sa.*,sp.full_name,sp.employee_code,ws.starts_at shift_starts_at,ws.ends_at shift_ends_at FROM staff_attendance_records sa JOIN staff_profiles sp ON sp.id=sa.staff_id LEFT JOIN work_shifts ws ON ws.id=sa.shift_id"+clause+" ORDER BY sa.checked_at DESC",args))
+            elif path=='/api/staff/reports':
+                if not self.can_manage_staff(con,actor,'staff.view'): return
+                clause,args=self.staff_scope(actor)
+                total=con.execute("SELECT count(*) FROM staff_profiles sp"+clause,args).fetchone()[0]
+                active=con.execute("SELECT count(*) FROM staff_profiles sp"+clause+(" AND" if clause else " WHERE")+" employment_status='active'",args).fetchone()[0]
+                shift_clause,shift_args=("",[]) if actor['role']=='admin' else (" WHERE ws.branch_id=?",[actor['branch_id']])
+                scheduled=con.execute("SELECT count(*) FROM work_shifts ws"+shift_clause,shift_args).fetchone()[0]
+                attendance_clause,attendance_args=("",[]) if actor['role']=='admin' else (" WHERE EXISTS (SELECT 1 FROM staff_branches sb WHERE sb.staff_id=sa.staff_id AND sb.branch_id=?)",[actor['branch_id']])
+                checkins=con.execute("SELECT count(*) FROM staff_attendance_records sa"+attendance_clause,attendance_args).fetchone()[0]
+                data={"staff_total":total,"staff_active":active,"shifts":scheduled,"checkins":checkins,"by_status":rows(con.execute("SELECT employment_status status,count(*) total FROM staff_profiles sp"+clause+" GROUP BY employment_status",args))}
             elif path.startswith('/api/staff/'):
                 if not self.can_manage_staff(con,actor,'staff.view'): return
                 sid=int(path.rsplit('/',1)[1])

@@ -42,5 +42,6 @@ class ApiTests(unittest.TestCase):
   s,_=self.call('POST','/api/staff/shifts',{'staff_id':staff['id'],'branch_id':1,'starts_at':'2026-11-22T08:00:00','ends_at':'2026-11-22T17:00:00'},admin); self.assertEqual(s,201)
   staff_token=self.login('staff.api','staffpass'); s,_=self.call('POST','/api/staff/attendance',{'check_type':'check_in','photo_data':'data:image/jpeg;base64,test','latitude':10.77,'longitude':106.70},staff_token); self.assertEqual(s,201)
   s,d=self.call('GET','/api/staff/attendance',token=admin); self.assertTrue(any(x['employee_code']=='NVAPI01' for x in d['data']))
+  s,d=self.call('GET','/api/staff/reports',token=admin); self.assertEqual(s,200); self.assertGreaterEqual(d['data']['shifts'],1); self.assertGreaterEqual(d['data']['checkins'],1)
   manager=self.login('manager.q1','manager'); s,_=self.call('POST','/api/staff',{'employee_code':'NVBLOCK','full_name':'Blocked','phone':'0909000000','branch_ids':[1],'role_codes':['admin']},manager); self.assertEqual(s,403)
 if __name__=='__main__': unittest.main()
