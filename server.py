@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 ROOT = Path(__file__).parent
-DB = ROOT / "database" / "spaflow_test.sqlite3"
+DB = Path(os.getenv("SPAFLOW_DATABASE", str(ROOT / "database" / "spaflow_test.sqlite3")))
 SESSIONS = {}
 ROLES = {"admin", "cskh", "manager", "student"}
 
