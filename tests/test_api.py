@@ -21,7 +21,13 @@ class ApiTests(unittest.TestCase):
  def test_login_and_branch_scope(self):
   t=self.login('manager.q1','manager'); s,d=self.call('GET','/api/customers',token=t); self.assertEqual(s,200); self.assertTrue(all(x['branch_id']==1 for x in d['data']))
  def test_customer_and_appointment(self):
-  t=self.login('cskh','cskh'); s,_=self.call('POST','/api/customers',{'full_name':'Khách API','phone':'0911111111'},t); self.assertEqual(s,201); s,d=self.call('GET','/api/customers?q='+quote('Khách API'),token=t); self.assertEqual(s,200); cid=d['data'][0]['id']; s,_=self.call('POST','/api/appointments',{'customer_id':cid,'starts_at':'2026-11-25T09:00:00'},t); self.assertEqual(s,201)
+  t=self.login('cskh','cskh'); s,_=self.call('POST','/api/customers',{'full_name':'Khách API','phone':'0911111111'},t); self.assertEqual(s,201); s,d=self.call('GET','/api/customers?q='+quote('Khách API'),token=t); self.assertEqual(s,200); cid=d['data'][0]['id']; s,_=self.call('PUT','/api/customers/'+str(cid),{'full_name':'Khách API đã sửa','phone':'0922222222'},t); self.assertEqual(s,200); s,_=self.call('POST','/api/appointments',{'customer_id':cid,'starts_at':'2026-11-25T09:00:00'},t); self.assertEqual(s,201); s,d=self.call('GET','/api/appointments',token=t); aid=next(x['id'] for x in d['data'] if x['customer_id']==cid); s,_=self.call('DELETE','/api/appointments/'+str(aid),token=t); self.assertEqual(s,200)
  def test_attendance_protection(self):
   t=self.login('student.mai','student'); s,d=self.call('POST','/api/attendance',{'session_id':1},t); self.assertEqual(s,201); s,d=self.call('POST','/api/attendance',{'session_id':1},t); self.assertEqual(s,409)
+ def test_payment_is_transactional_and_scoped(self):
+  t=self.login('manager.q1','manager'); s,d=self.call('GET','/api/invoices',token=t); invoice=next(x for x in d['data'] if x['branch_id']==1 and x['total']>x['paid']); amount=invoice['total']-invoice['paid']; s,_=self.call('POST','/api/payments',{'invoice_id':invoice['id'],'amount':amount,'method':'cash'},t); self.assertEqual(s,201); s,d=self.call('GET','/api/invoices',token=t); changed=next(x for x in d['data'] if x['id']==invoice['id']); self.assertEqual(changed['status'],'paid'); self.assertEqual(changed['paid'],changed['total'])
+ def test_stock_prevents_negative_inventory(self):
+  t=self.login('manager.q1','manager'); s,d=self.call('GET','/api/products',token=t); product=d['data'][0]; s,d=self.call('POST','/api/stock-movements',{'product_id':product['id'],'quantity':product['stock']+1,'movement_type':'out'},t); self.assertEqual(s,422); s,_=self.call('POST','/api/stock-movements',{'product_id':product['id'],'quantity':2,'movement_type':'in'},t); self.assertEqual(s,201)
+ def test_student_cannot_create_customer(self):
+  t=self.login('student.mai','student'); s,_=self.call('POST','/api/customers',{'full_name':'Không được tạo','phone':'0900000000'},t); self.assertEqual(s,403)
 if __name__=='__main__': unittest.main()

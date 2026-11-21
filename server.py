@@ -127,6 +127,10 @@ class App(SimpleHTTPRequestHandler):
                 clause,args=self.where(actor); data=rows(con.execute("SELECT * FROM products"+clause,args))
             elif path=='/api/invoices':
                 clause,args=self.where(actor); data=rows(con.execute("SELECT i.*,c.full_name customer_name FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id"+clause.replace('branch_id','i.branch_id'),args))
+            elif path=='/api/payments':
+                clause,args=self.where(actor); data=rows(con.execute("SELECT p.*,i.code invoice_code FROM payments p JOIN invoices i ON i.id=p.invoice_id"+clause.replace('branch_id','i.branch_id')+" ORDER BY p.paid_at DESC",args))
+            elif path=='/api/stock-movements':
+                clause,args=self.where(actor); data=rows(con.execute("SELECT sm.*,p.name product_name FROM stock_movements sm JOIN products p ON p.id=sm.product_id"+clause.replace('branch_id','sm.branch_id')+" ORDER BY sm.created_at DESC",args))
             else: return self.json(404,{"error":"API không tồn tại"})
             self.json(200,{"data":data})
         finally: con.close()
@@ -158,9 +162,58 @@ class App(SimpleHTTPRequestHandler):
                 if not con.execute("SELECT 1 FROM enrollments WHERE class_id=? AND student_id=?",(session['class_id'],student['id'])).fetchone(): return self.json(403,{"error":"Bạn không thuộc lớp học này"})
                 if con.execute("SELECT 1 FROM attendance_records WHERE session_id=? AND student_id=?",(session_id,student['id'])).fetchone(): return self.json(409,{"error":"Bạn đã có kết quả điểm danh cho buổi này"})
                 status='present' if body.get('latitude') is not None and body.get('photo_data') else 'pending_verification'; cur=con.execute("INSERT INTO attendance_records(session_id,student_id,status,checked_in_at,photo_data,latitude,longitude,accuracy_m,note,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(session_id,student['id'],status,datetime.now().isoformat(),body.get('photo_data'),body.get('latitude'),body.get('longitude'),body.get('accuracy_m'),body.get('note'),datetime.now().isoformat())); self.audit(con,actor,'checkin','attendance',cur.lastrowid,{"status":status})
+            elif path=='/api/stock-movements':
+                if actor['role'] not in ('admin','manager'): return self.json(403,{"error":"Không có quyền điều chỉnh kho"})
+                product_id=int(body.get('product_id',0)); quantity=int(body.get('quantity',0)); movement=body.get('movement_type')
+                if not product_id or not quantity or movement not in ('in','out','adjustment'): return self.json(422,{"error":"Sản phẩm, số lượng và loại nhập/xuất là bắt buộc"})
+                con.execute('BEGIN IMMEDIATE'); product=row(con.execute("SELECT * FROM products WHERE id=?",(product_id,)).fetchone())
+                if not product or (actor['role']!='admin' and product['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy sản phẩm trong chi nhánh của bạn"})
+                delta=abs(quantity) if movement=='in' else (-abs(quantity) if movement=='out' else quantity)
+                if product['stock']+delta<0: return self.json(422,{"error":"Tồn kho không đủ để xuất"})
+                con.execute("UPDATE products SET stock=stock+? WHERE id=?",(delta,product_id)); cur=con.execute("INSERT INTO stock_movements(branch_id,product_id,movement_type,quantity,note,created_at) VALUES(?,?,?,?,?,?)",(product['branch_id'],product_id,movement,delta,body.get('note',''),datetime.now().isoformat())); self.audit(con,actor,'stock_'+movement,'product',product_id,{"quantity":delta,"movement_id":cur.lastrowid})
+            elif path=='/api/payments':
+                if actor['role'] not in ('admin','manager','cskh'): return self.json(403,{"error":"Không có quyền thu tiền"})
+                invoice_id=int(body.get('invoice_id',0)); amount=float(body.get('amount',0))
+                if amount<=0:return self.json(422,{"error":"Số tiền thanh toán phải lớn hơn 0"})
+                con.execute('BEGIN IMMEDIATE'); invoice=row(con.execute("SELECT * FROM invoices WHERE id=?",(invoice_id,)).fetchone())
+                if not invoice or (actor['role']!='admin' and invoice['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy hóa đơn trong chi nhánh của bạn"})
+                remaining=round(invoice['total']-invoice['paid'],2)
+                if amount>remaining:return self.json(422,{"error":"Số tiền vượt quá công nợ còn lại"})
+                new_paid=round(invoice['paid']+amount,2); status='paid' if new_paid>=invoice['total'] else 'partial'; cur=con.execute("INSERT INTO payments(invoice_id,amount,method,paid_at) VALUES(?,?,?,?)",(invoice_id,amount,body.get('method','cash'),datetime.now().isoformat())); con.execute("UPDATE invoices SET paid=?,status=? WHERE id=?",(new_paid,status,invoice_id)); self.audit(con,actor,'payment','invoice',invoice_id,{"payment_id":cur.lastrowid,"amount":amount})
             else:return self.json(404,{"error":"API không tồn tại"})
             con.commit(); self.json(201,{"ok":True})
         except sqlite3.IntegrityError as e: con.rollback(); self.json(409,{"error":"Dữ liệu bị trùng hoặc không hợp lệ","detail":str(e)})
+        finally: con.close()
+    def do_PUT(self):
+        path=urlparse(self.path).path; body=self.payload(); actor=self.require()
+        if not actor:return
+        con=db()
+        try:
+            if path.startswith('/api/customers/'):
+                if actor['role'] not in ('admin','cskh','manager'): return self.json(403,{"error":"Không có quyền sửa khách hàng"})
+                cid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM customers WHERE id=?",(cid,)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy khách hàng"})
+                name=body.get('full_name',current['full_name']).strip(); phone=body.get('phone',current['phone']).strip()
+                if not name or not phone:return self.json(422,{"error":"Họ tên và số điện thoại là bắt buộc"})
+                con.execute("UPDATE customers SET full_name=?,phone=?,customer_group=?,status=? WHERE id=?",(name,phone,body.get('customer_group',current['customer_group']),body.get('status',current['status']),cid)); self.audit(con,actor,'update','customer',cid,body)
+            elif path.startswith('/api/appointments/'):
+                if actor['role'] not in ('admin','cskh','manager'): return self.json(403,{"error":"Không có quyền sửa lịch hẹn"})
+                aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM appointments WHERE id=?",(aid,)).fetchone())
+                if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']): return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
+                con.execute("UPDATE appointments SET starts_at=?,staff_name=?,status=?,note=? WHERE id=?",(body.get('starts_at',current['starts_at']),body.get('staff_name',current['staff_name']),body.get('status',current['status']),body.get('note',current['note']),aid)); self.audit(con,actor,'update','appointment',aid,body)
+            else:return self.json(404,{"error":"API không tồn tại"})
+            con.commit(); self.json(200,{"ok":True})
+        finally: con.close()
+    def do_DELETE(self):
+        path=urlparse(self.path).path; actor=self.require()
+        if not actor:return
+        if not path.startswith('/api/appointments/'):return self.json(404,{"error":"API không tồn tại"})
+        if actor['role'] not in ('admin','cskh','manager'):return self.json(403,{"error":"Không có quyền hủy lịch hẹn"})
+        con=db()
+        try:
+            aid=int(path.rsplit('/',1)[1]); current=row(con.execute("SELECT * FROM appointments WHERE id=?",(aid,)).fetchone())
+            if not current or (actor['role']!='admin' and current['branch_id']!=actor['branch_id']):return self.json(404,{"error":"Không tìm thấy lịch hẹn"})
+            con.execute("UPDATE appointments SET status='cancelled' WHERE id=?",(aid,)); self.audit(con,actor,'cancel','appointment',aid); con.commit(); self.json(200,{"ok":True})
         finally: con.close()
 
 if __name__=='__main__':
